@@ -11,7 +11,7 @@ from telethon.tl.functions.channels import JoinChannelRequest
 
 API_ID = 31053465
 API_HASH = "557478eb1546473d5d4da5a15990b379"
-BOT_TOKEN = "8285296504:AAEW7lyDUdAgwXv0rZx1WQEFYeONUaDXplk"
+BOT_TOKEN = "8285296504:AAELcUuzAmjX1gynoiBGtuvf7DnQLCkbZGo"
 ADMIN_ID = 61674147
 
 USER_SESSION = "userbot"
