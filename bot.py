@@ -75,44 +75,176 @@ def save_processed(x):
     with open(PROCESSED_FILE, "a") as f:
         f.write(x + "\n")
 
-# ================= CONFIG EXTRACTOR =================
+# ================= BUILD VLESS =================
+
+def build_vless(config_data):
+
+    try:
+
+        outbound = config_data["outbounds"][0]
+
+        vnext = outbound["settings"]["vnext"][0]
+
+        user_data = vnext["users"][0]
+
+        stream = outbound["streamSettings"]
+
+        address = vnext["address"]
+        port = vnext["port"]
+
+        uuid = user_data["id"]
+
+        security = stream.get("security", "none")
+
+        network = stream.get("network", "ws")
+
+        host = (
+            stream
+            .get("wsSettings", {})
+            .get("headers", {})
+            .get("Host", "")
+        )
+
+        path = (
+            stream
+            .get("wsSettings", {})
+            .get("path", "/")
+        )
+
+        sni = (
+            stream
+            .get("tlsSettings", {})
+            .get("serverName", "")
+        )
+
+        name = "Decrypted"
+
+        link = (
+            f"vless://{uuid}@{address}:{port}"
+            f"?type={network}"
+            f"&security={security}"
+            f"&path={path}"
+            f"&host={host}"
+            f"&sni={sni}"
+            f"#{name}"
+        )
+
+        return link
+
+    except Exception as e:
+
+        logging.error(f"Build VLESS Error: {e}")
+
+        return None
+
+# ================= BUILD SSH =================
+
+def build_ssh(data):
+
+    try:
+
+        ssh = (
+            data["encryptedLockedConfig"]
+            ["EncryptedLockedConfig"]
+            ["SshConfig"]
+        )
+
+        host = ssh.get("EncryptedHost", "")
+        port = ssh.get("EncryptedPort", "")
+        user = ssh.get("EncryptedUsername", "")
+        password = ssh.get("EncryptedPassword", "")
+
+        if not host:
+            return None
+
+        return f"{host}:{port}@{user}:{password}"
+
+    except Exception as e:
+
+        logging.error(f"SSH Build Error: {e}")
+
+        return None
+
+# ================= EXTRACT CONFIGS =================
 
 def extract_all_configs(data, results):
 
-    if isinstance(data, dict):
+    try:
 
-        for k, v in data.items():
+        if isinstance(data, dict):
 
-            if isinstance(v, str):
+            # DIRECT LINKS
+            for k, v in data.items():
 
-                value = v.strip()
-                low = value.lower()
+                if isinstance(v, str):
 
-                # VPN CONFIGS
+                    low = v.lower()
+
+                    if (
+                        "vless://" in low
+                        or "vmess://" in low
+                        or "trojan://" in low
+                        or "ss://" in low
+                        or "hy2://" in low
+                        or "hysteria2://" in low
+                    ):
+
+                        results.append(v.strip())
+
+                extract_all_configs(v, results)
+
+            # BUILD SSH
+            try:
+
+                tunnel_type = (
+                    data
+                    .get("encryptedLockedConfig", {})
+                    .get("LockedAppConfig", {})
+                    .get("TunnelType", "")
+                )
+
+                if tunnel_type.upper() == "SSH":
+
+                    ssh_link = build_ssh(data)
+
+                    if ssh_link:
+                        results.append(ssh_link)
+
+            except:
+                pass
+
+            # BUILD VLESS
+            try:
+
+                enc = (
+                    data["encryptedLockedConfig"]
+                    ["EncryptedLockedConfig"]
+                    ["V2RayConfig"]
+                    ["EncryptedConfig"]
+                )
+
                 if (
-                    "vless://" in low
-                    or "vmess://" in low
-                    or "trojan://" in low
-                    or "ss://" in low
-                    or "hy2://" in low
-                    or "hysteria2://" in low
+                    isinstance(enc, dict)
+                    and "outbounds" in enc
                 ):
 
-                    results.append(value)
+                    vless = build_vless(enc)
 
-                # SSH FORMAT
-                if re.match(
-                    r"^[^:\s]+:[0-9]+@[^:\s]+:[^:\s]+$",
-                    value
-                ):
-                    results.append(value)
+                    if vless:
+                        results.append(vless)
 
-            extract_all_configs(v, results)
+            except:
+                pass
 
-    elif isinstance(data, list):
+        elif isinstance(data, list):
 
-        for item in data:
-            extract_all_configs(item, results)
+            for item in data:
+
+                extract_all_configs(item, results)
+
+    except Exception as e:
+
+        logging.error(f"Extract Error: {e}")
 
 # ================= ADMIN CHECK =================
 
@@ -138,7 +270,7 @@ async def start(event):
         "/set_main_channel @channel\n\n"
         "/add_keyword keyword\n"
         "/remove_keyword keyword\n"
-        "/show_keywords\n\n"
+        "/show_keywords\n"
         "/show_config"
     )
 
@@ -293,11 +425,6 @@ async def add_keyword(event):
 
     args = event.raw_text.split()[1:]
 
-    if not args:
-        return await event.reply(
-            "Usage:\n/add_keyword word"
-        )
-
     added = []
 
     for kw in args:
@@ -312,7 +439,7 @@ async def add_keyword(event):
     save_config()
 
     await event.reply(
-        f"✅ Keywords added:\n\n{added}"
+        f"✅ Added:\n\n{added}"
     )
 
 # ================= REMOVE KEYWORD =================
@@ -353,7 +480,7 @@ async def show_keywords(event):
     txt = "\n".join(config["keywords"])
 
     if not txt:
-        txt = "All files"
+        txt = "No keywords"
 
     await event.reply(txt)
 
@@ -406,11 +533,9 @@ async def monitor(event):
         if unique_id in processed:
             return
 
-        # ONLY MEDIA
         if not msg.media:
             return
 
-        # KEYWORD FILTER
         matched = True
 
         if config["keywords"]:
@@ -533,35 +658,44 @@ async def decrypt_response(event):
         # JSON TRY
         try:
 
-            data = json.loads(text)
+            start = text.find("{")
+            end = text.rfind("}") + 1
 
-            extract_all_configs(
-                data,
-                configs
-            )
+            if start != -1 and end != -1:
 
-        except:
+                json_text = text[start:end]
 
-            # REGEX FALLBACK
-            patterns = [
-                r'vless://[^\s]+',
-                r'vmess://[^\s]+',
-                r'trojan://[^\s]+',
-                r'ss://[^\s]+',
-                r'hy2://[^\s]+',
-                r'hysteria2://[^\s]+',
-                r'[^\s]+:[0-9]+@[^\s]+:[^\s]+'
-            ]
+                data = json.loads(json_text)
 
-            for p in patterns:
-
-                found = re.findall(
-                    p,
-                    text,
-                    re.IGNORECASE
+                extract_all_configs(
+                    data,
+                    configs
                 )
 
-                configs.extend(found)
+        except Exception as e:
+
+            logging.error(e)
+
+        # REGEX FALLBACK
+        patterns = [
+            r'vless://[^\s]+',
+            r'vmess://[^\s]+',
+            r'trojan://[^\s]+',
+            r'ss://[^\s]+',
+            r'hy2://[^\s]+',
+            r'hysteria2://[^\s]+',
+            r'[^\s]+:[0-9]+@[^\s]+:[^\s]+'
+        ]
+
+        for p in patterns:
+
+            found = re.findall(
+                p,
+                text,
+                re.IGNORECASE
+            )
+
+            configs.extend(found)
 
         configs = list(
             set(
