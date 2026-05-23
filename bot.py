@@ -11,8 +11,8 @@ from telethon.tl.functions.channels import JoinChannelRequest
 
 API_ID = 31053465
 API_HASH = "557478eb1546473d5d4da5a15990b379"
-BOT_TOKEN = "8285296504:AAELcUuzAmjX1gynoiBGtuvf7DnQLCkbZGo"
-ADMIN_ID = 61674147
+BOT_TOKEN = "8285296504:AAHW15d5UcTTYrxR1uAdevw8VNDLLQ9y7l0"
+ADMIN_ID = 6167414734
 
 USER_SESSION = "userbot"
 
@@ -96,7 +96,7 @@ async def start(event):
         return
 
     await event.reply(
-        "🤖 BOT READY\n\n"
+        "🤖 BOT Ready for work chaliye suru karate hai\n\n"
         "/add_channel @name\n"
         "/remove_channel @name\n"
         "/show_channels\n"
