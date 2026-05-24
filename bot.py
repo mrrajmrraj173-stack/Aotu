@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+from collections import deque
 
 from telethon import TelegramClient, events
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -75,28 +76,85 @@ def save_processed(x):
     with open(PROCESSED_FILE, "a") as f:
         f.write(x + "\n")
 
+# ================= GLOBAL =================
+
+queue = deque()
+
+processing = False
+
+allowed_extensions = [
+    ".hc",
+    ".ehi",
+    ".npvt",
+    ".dark",
+    ".ssh"
+]
+
+# ================= EXTRACT CONFIGS =================
+
+def extract_configs(text):
+
+    configs = []
+
+    patterns = [
+        r'vless://[^\s]+',
+        r'vmess://[^\s]+',
+        r'trojan://[^\s]+',
+        r'ss://[^\s]+',
+        r'hy2://[^\s]+',
+        r'hysteria2://[^\s]+',
+        r'[a-zA-Z0-9._-]+:\d+@[^\s:]+:[^\s]+'
+    ]
+
+    for p in patterns:
+
+        found = re.findall(
+            p,
+            text,
+            re.IGNORECASE
+        )
+
+        configs.extend(found)
+
+    return list(
+        set(
+            [
+                x.strip()
+                for x in configs
+                if x.strip()
+            ]
+        )
+    )
+
 # ================= BUILD VLESS =================
 
-def build_vless(config_data):
+def build_vless(outbound):
 
     try:
-
-        outbound = config_data["outbounds"][0]
 
         vnext = outbound["settings"]["vnext"][0]
 
         user_data = vnext["users"][0]
 
-        stream = outbound["streamSettings"]
+        stream = outbound.get(
+            "streamSettings",
+            {}
+        )
 
-        address = vnext["address"]
-        port = vnext["port"]
+        address = vnext.get("address", "")
+        port = vnext.get("port", 443)
 
-        uuid = user_data["id"]
+        uuid = user_data.get("id", "")
 
-        security = stream.get("security", "none")
+        security = stream.get(
+            "security",
+            "none"
+        )
 
-        network = stream.get("network", "ws")
+        network = stream.get(
+            "network",
+            "ws"
+        )
 
         host = (
             stream
@@ -117,141 +175,88 @@ def build_vless(config_data):
             .get("serverName", "")
         )
 
-        name = "Decrypted"
-
-        link = (
+        return (
             f"vless://{uuid}@{address}:{port}"
             f"?type={network}"
             f"&security={security}"
             f"&path={path}"
             f"&host={host}"
             f"&sni={sni}"
-            f"#{name}"
+            f"#Decrypted"
         )
-
-        return link
 
     except Exception as e:
 
-        logging.error(f"Build VLESS Error: {e}")
+        logging.error(e)
 
         return None
 
-# ================= BUILD SSH =================
+# ================= JSON EXTRACT =================
 
-def build_ssh(data):
-
-    try:
-
-        ssh = (
-            data["encryptedLockedConfig"]
-            ["EncryptedLockedConfig"]
-            ["SshConfig"]
-        )
-
-        host = ssh.get("EncryptedHost", "")
-        port = ssh.get("EncryptedPort", "")
-        userx = ssh.get("EncryptedUsername", "")
-        password = ssh.get("EncryptedPassword", "")
-
-        if not host:
-            return None
-
-        return f"{host}:{port}@{userx}:{password}"
-
-    except Exception as e:
-
-        logging.error(f"SSH Build Error: {e}")
-
-        return None
-
-# ================= EXTRACT =================
-
-def extract_all_configs(data, results):
+def extract_json_configs(data, results):
 
     try:
 
         if isinstance(data, dict):
 
+            # DIRECT
             for k, v in data.items():
 
                 if isinstance(v, str):
 
-                    low = v.lower()
+                    results.extend(
+                        extract_configs(v)
+                    )
 
-                    if (
-                        "vless://" in low
-                        or "vmess://" in low
-                        or "trojan://" in low
-                        or "ss://" in low
-                        or "hy2://" in low
-                        or "hysteria2://" in low
-                    ):
-
-                        results.append(v.strip())
-
-                extract_all_configs(v, results)
-
-            # SSH
-            try:
-
-                tunnel_type = (
-                    data
-                    .get("encryptedLockedConfig", {})
-                    .get("LockedAppConfig", {})
-                    .get("TunnelType", "")
+                extract_json_configs(
+                    v,
+                    results
                 )
 
-                if tunnel_type.upper() == "SSH":
+            # V2RAY CONFIG
+            if "outbounds" in data:
 
-                    ssh_link = build_ssh(data)
+                try:
 
-                    if ssh_link:
-                        results.append(ssh_link)
+                    for outbound in data["outbounds"]:
 
-            except:
-                pass
+                        protocol = outbound.get(
+                            "protocol",
+                            ""
+                        ).lower()
 
-            # VLESS
-            try:
+                        if protocol == "vless":
 
-                enc = (
-                    data["encryptedLockedConfig"]
-                    ["EncryptedLockedConfig"]
-                    ["V2RayConfig"]
-                    ["EncryptedConfig"]
-                )
+                            link = build_vless(
+                                outbound
+                            )
 
-                if (
-                    isinstance(enc, dict)
-                    and "outbounds" in enc
-                ):
+                            if link:
+                                results.append(link)
 
-                    vless = build_vless(enc)
-
-                    if vless:
-                        results.append(vless)
-
-            except:
-                pass
+                except:
+                    pass
 
         elif isinstance(data, list):
 
             for item in data:
 
-                extract_all_configs(item, results)
+                extract_json_configs(
+                    item,
+                    results
+                )
 
     except Exception as e:
 
-        logging.error(f"Extract Error: {e}")
+        logging.error(e)
 
-# ================= ADMIN =================
+# ================= ADMIN CHECK =================
 
 def is_admin(event):
 
     return event.sender_id == ADMIN_ID
 
-# ================= START =================
+# ================= COMMANDS =================
 
 @bot.on(events.NewMessage(pattern=r"^/start"))
 async def start(event):
@@ -260,36 +265,15 @@ async def start(event):
         return
 
     await event.reply(
-        "🤖 USERBOT MANAGER\n\n"
-        "/status\n"
         "/add_channel @channel\n"
         "/remove_channel @channel\n"
         "/show_channels\n\n"
-        "/set_decrypt_bot @bot\n"
-        "/set_main_channel @channel\n\n"
+        "/set_main_channel @channel\n"
+        "/set_decrypt_bot @bot\n\n"
         "/add_keyword keyword\n"
         "/remove_keyword keyword\n"
-        "/show_keywords\n"
-        "/show_config"
+        "/show_keywords"
     )
-
-# ================= STATUS =================
-
-@bot.on(events.NewMessage(pattern=r"^/status"))
-async def status(event):
-
-    if not is_admin(event):
-        return
-
-    txt = (
-        f"🤖 STATUS\n\n"
-        f"📡 Channels:\n{config['source_channels']}\n\n"
-        f"🔑 Keywords:\n{config['keywords']}\n\n"
-        f"📤 Main Channel:\n{config['main_channel']}\n\n"
-        f"🤖 Decrypt Bot:\n{config['decrypt_bot']}"
-    )
-
-    await event.reply(txt)
 
 # ================= ADD CHANNEL =================
 
@@ -301,9 +285,6 @@ async def add_channel(event):
 
     args = event.raw_text.split()[1:]
 
-    if not args:
-        return
-
     for ch in args:
 
         if ch not in config["source_channels"]:
@@ -311,13 +292,15 @@ async def add_channel(event):
             config["source_channels"].append(ch)
 
             try:
-                await user(JoinChannelRequest(ch))
+                await user(
+                    JoinChannelRequest(ch)
+                )
             except:
                 pass
 
     save_config()
 
-    await event.reply("✅ Channel added")
+    await event.reply("✅ Added")
 
 # ================= REMOVE CHANNEL =================
 
@@ -332,6 +315,7 @@ async def remove_channel(event):
     for ch in args:
 
         if ch in config["source_channels"]:
+
             config["source_channels"].remove(ch)
 
     save_config()
@@ -346,36 +330,19 @@ async def show_channels(event):
     if not is_admin(event):
         return
 
-    txt = "\n".join(config["source_channels"])
+    txt = "\n".join(
+        config["source_channels"]
+    )
 
     if not txt:
         txt = "No channels"
 
     await event.reply(txt)
 
-# ================= SET DECRYPT BOT =================
-
-@bot.on(events.NewMessage(pattern=r"^/set_decrypt_bot"))
-async def set_decrypt_bot(event):
-
-    if not is_admin(event):
-        return
-
-    args = event.raw_text.split()
-
-    if len(args) < 2:
-        return
-
-    config["decrypt_bot"] = args[1]
-
-    save_config()
-
-    await event.reply("✅ Saved")
-
-# ================= SET MAIN CHANNEL =================
+# ================= SET MAIN =================
 
 @bot.on(events.NewMessage(pattern=r"^/set_main_channel"))
-async def set_main_channel(event):
+async def set_main(event):
 
     if not is_admin(event):
         return
@@ -391,7 +358,26 @@ async def set_main_channel(event):
 
     await event.reply("✅ Saved")
 
-# ================= ADD KEYWORD =================
+# ================= SET DECRYPT BOT =================
+
+@bot.on(events.NewMessage(pattern=r"^/set_decrypt_bot"))
+async def set_bot(event):
+
+    if not is_admin(event):
+        return
+
+    args = event.raw_text.split()
+
+    if len(args) < 2:
+        return
+
+    config["decrypt_bot"] = args[1]
+
+    save_config()
+
+    await event.reply("✅ Saved")
+
+# ================= KEYWORDS =================
 
 @bot.on(events.NewMessage(pattern=r"^/add_keyword"))
 async def add_keyword(event):
@@ -406,28 +392,114 @@ async def add_keyword(event):
         kw = kw.lower()
 
         if kw not in config["keywords"]:
+
             config["keywords"].append(kw)
 
     save_config()
 
-    await event.reply("✅ Keyword added")
+    await event.reply("✅ Added")
 
-# ================= SHOW CONFIG =================
+# ================= REMOVE KEYWORD =================
 
-@bot.on(events.NewMessage(pattern=r"^/show_config"))
-async def show_config(event):
+@bot.on(events.NewMessage(pattern=r"^/remove_keyword"))
+async def remove_keyword(event):
 
     if not is_admin(event):
         return
 
-    txt = (
-        f"📡 Channels:\n{config['source_channels']}\n\n"
-        f"🤖 Decrypt Bot:\n{config['decrypt_bot']}\n\n"
-        f"📤 Main Channel:\n{config['main_channel']}\n\n"
-        f"🔑 Keywords:\n{config['keywords']}"
-    )
+    args = event.raw_text.split()[1:]
+
+    for kw in args:
+
+        kw = kw.lower()
+
+        if kw in config["keywords"]:
+
+            config["keywords"].remove(kw)
+
+    save_config()
+
+    await event.reply("✅ Removed")
+
+# ================= SHOW KEYWORDS =================
+
+@bot.on(events.NewMessage(pattern=r"^/show_keywords"))
+async def show_keywords(event):
+
+    if not is_admin(event):
+        return
+
+    txt = "\n".join(config["keywords"])
+
+    if not txt:
+        txt = "No keywords"
 
     await event.reply(txt)
+
+# ================= KEEP ALIVE =================
+
+async def keep_alive():
+
+    while True:
+
+        try:
+
+            if config["decrypt_bot"]:
+
+                await user.send_message(
+                    config["decrypt_bot"],
+                    "alive"
+                )
+
+        except Exception as e:
+
+            logging.error(e)
+
+        await asyncio.sleep(30)
+
+# ================= PROCESS QUEUE =================
+
+async def process_queue():
+
+    global processing
+
+    while True:
+
+        if processing:
+
+            await asyncio.sleep(2)
+            continue
+
+        if not queue:
+
+            await asyncio.sleep(2)
+            continue
+
+        processing = True
+
+        item = queue.popleft()
+
+        try:
+
+            path = item["path"]
+
+            await user.send_file(
+                config["decrypt_bot"],
+                path,
+                caption="decrypt"
+            )
+
+            logging.info(
+                "Sent to decrypt bot"
+            )
+
+            await asyncio.sleep(40)
+
+        except Exception as e:
+
+            logging.error(e)
+
+        processing = False
 
 # ================= MONITOR =================
 
@@ -436,15 +508,16 @@ async def monitor(event):
 
     try:
 
-        if not config["decrypt_bot"]:
-            return
-
         if not config["main_channel"]:
             return
 
         chat = await event.get_chat()
 
-        username = getattr(chat, "username", None)
+        username = getattr(
+            chat,
+            "username",
+            None
+        )
 
         if not username:
             return
@@ -461,8 +534,9 @@ async def monitor(event):
         if unique_id in processed:
             return
 
-        if not msg.media:
-            return
+        text = msg.raw_text or ""
+
+        # ================= KEYWORD CHECK =================
 
         matched = True
 
@@ -470,14 +544,13 @@ async def monitor(event):
 
             matched = False
 
-            text = (
-                msg.raw_text or ""
-            ).lower()
+            low = text.lower()
 
             for kw in config["keywords"]:
 
-                if kw in text:
+                if kw in low:
                     matched = True
+                    break
 
             if msg.file:
 
@@ -489,38 +562,76 @@ async def monitor(event):
 
                     if kw in name:
                         matched = True
+                        break
 
         if not matched:
             return
 
-        logging.info(
-            f"Downloading from {username}"
-        )
+        # ================= DIRECT CONFIG =================
+
+        direct_configs = extract_configs(text)
+
+        if direct_configs:
+
+            await user.send_message(
+                config["main_channel"],
+                "\n\n".join(direct_configs)
+            )
+
+            processed.add(unique_id)
+
+            save_processed(unique_id)
+
+            return
+
+        # ================= FILE ONLY =================
+
+        if not msg.file:
+            return
+
+        filename = (
+            msg.file.name or ""
+        ).lower()
+
+        # ignore media
+        if (
+            filename.endswith(".jpg")
+            or filename.endswith(".png")
+            or filename.endswith(".mp4")
+            or filename.endswith(".jpeg")
+            or filename.endswith(".webp")
+        ):
+            return
+
+        valid = False
+
+        for ext in allowed_extensions:
+
+            if filename.endswith(ext):
+
+                valid = True
+                break
+
+        if not valid:
+            return
 
         path = await msg.download_media()
 
-        if not path:
-            return
-
-        logging.info(
-            "Sending to decrypt bot"
-        )
-
-        await user.send_file(
-            config["decrypt_bot"],
-            path,
-            caption="decrypt"
-        )
+        queue.append({
+            "path": path
+        })
 
         processed.add(unique_id)
 
         save_processed(unique_id)
 
+        logging.info(
+            f"Queued: {filename}"
+        )
+
     except Exception as e:
 
-        logging.error(
-            f"Monitor Error: {e}"
-        )
+        logging.error(e)
 
 # ================= DECRYPT RESPONSE =================
 
@@ -535,7 +646,8 @@ async def decrypt_response(event):
         sender = await event.get_sender()
 
         sender_username = (
-            getattr(sender, "username", "") or ""
+            getattr(sender, "username", "")
+            or ""
         ).lower()
 
         decrypt_name = (
@@ -549,13 +661,15 @@ async def decrypt_response(event):
 
         text = ""
 
-        # ===== FILE =====
-
         if event.file:
 
-            path = await event.download_media()
+            filename = (
+                event.file.name or ""
+            ).lower()
 
-            try:
+            if filename.endswith(".txt"):
+
+                path = await event.download_media()
 
                 with open(
                     path,
@@ -566,16 +680,7 @@ async def decrypt_response(event):
 
                     text = f.read()
 
-            except Exception as e:
-
-                logging.error(e)
-
-            finally:
-
-                try:
-                    os.remove(path)
-                except:
-                    pass
+                os.remove(path)
 
         elif event.raw_text:
 
@@ -586,8 +691,12 @@ async def decrypt_response(event):
 
         configs = []
 
-        # ===== JSON =====
+        # DIRECT
+        configs.extend(
+            extract_configs(text)
+        )
 
+        # JSON
         try:
 
             start = text.find("{")
@@ -595,126 +704,61 @@ async def decrypt_response(event):
 
             if start != -1 and end != -1:
 
-                json_text = text[start:end]
+                data = json.loads(
+                    text[start:end]
+                )
 
-                data = json.loads(json_text)
-
-                extract_all_configs(
+                extract_json_configs(
                     data,
                     configs
                 )
 
         except Exception as e:
 
-            logging.error(
-                f"JSON Error: {e}"
+            logging.error(e)
+
+        configs = list(
+            set(
+                [
+                    x.strip()
+                    for x in configs
+                    if x.strip()
+                ]
             )
-
-        # ===== REGEX =====
-
-        patterns = [
-
-            r'vless://[^\s]+',
-            r'vmess://[^\s]+',
-            r'trojan://[^\s]+',
-            r'ss://[^\s]+',
-            r'hy2://[^\s]+',
-            r'hysteria2://[^\s]+',
-
-            r'[^\s:@]+:[0-9]+@[^\s:@]+:[^\s]+'
-        ]
-
-        for p in patterns:
-
-            found = re.findall(
-                p,
-                text,
-                re.IGNORECASE
-            )
-
-            configs.extend(found)
-
-        # ===== CLEAN =====
-
-        clean = []
-
-        for x in configs:
-
-            x = x.strip()
-
-            if x and x not in clean:
-                clean.append(x)
-
-        configs = clean
+        )
 
         if not configs:
 
             logging.warning(
-                "No configs found"
+                "No configs extracted"
             )
 
             return
 
-        output = "\n\n".join(configs)
+        final_text = "\n\n".join(configs)
 
-        # ===== DIRECT SEND =====
-
-        if len(output) < 4000:
-
-            await user.send_message(
-                config["main_channel"],
-                output
-            )
-
-        else:
-
-            parts = []
-
-            while len(output) > 3500:
-
-                cut = output.rfind(
-                    "\n\n",
-                    0,
-                    3500
-                )
-
-                if cut == -1:
-                    cut = 3500
-
-                parts.append(
-                    output[:cut]
-                )
-
-                output = output[cut:]
-
-            parts.append(output)
-
-            for p in parts:
-
-                await user.send_message(
-                    config["main_channel"],
-                    p
-                )
+        await user.send_message(
+            config["main_channel"],
+            final_text
+        )
 
         logging.info(
-            f"Sent {len(configs)} configs"
+            f"Uploaded {len(configs)} configs"
         )
 
     except Exception as e:
 
-        logging.error(
-            f"Decrypt Error: {e}"
-        )
+        logging.error(e)
 
 # ================= MAIN =================
 
 async def main():
 
-    print("Starting USERBOT...")
+    print("Starting USERBOT")
 
     await user.start()
 
-    print("Starting CONTROL BOT...")
+    print("Starting BOT")
 
     await bot.start(
         bot_token=BOT_TOKEN
@@ -726,7 +770,15 @@ async def main():
         f"Logged in as {me.first_name}"
     )
 
-    print("BOT RUNNING...")
+    asyncio.create_task(
+        keep_alive()
+    )
+
+    asyncio.create_task(
+        process_queue()
+    )
+
+    print("RUNNING")
 
     await asyncio.gather(
         user.run_until_disconnected(),
