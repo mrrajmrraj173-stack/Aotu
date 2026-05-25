@@ -199,7 +199,7 @@ def extract_json_configs(data, results):
 
         if isinstance(data, dict):
 
-            # DIRECT
+            # DIRECT CONFIGS
             for k, v in data.items():
 
                 if isinstance(v, str):
@@ -213,7 +213,7 @@ def extract_json_configs(data, results):
                     results
                 )
 
-            # V2RAY CONFIG
+            # VLESS BUILD
             if "outbounds" in data:
 
                 try:
@@ -256,7 +256,7 @@ def is_admin(event):
 
     return event.sender_id == ADMIN_ID
 
-# ================= COMMANDS =================
+# ================= START =================
 
 @bot.on(events.NewMessage(pattern=r"^/start"))
 async def start(event):
@@ -377,7 +377,7 @@ async def set_bot(event):
 
     await event.reply("✅ Saved")
 
-# ================= KEYWORDS =================
+# ================= ADD KEYWORD =================
 
 @bot.on(events.NewMessage(pattern=r"^/add_keyword"))
 async def add_keyword(event):
@@ -436,27 +436,6 @@ async def show_keywords(event):
 
     await event.reply(txt)
 
-# ================= KEEP ALIVE =================
-
-async def keep_alive():
-
-    while True:
-
-        try:
-
-            if config["decrypt_bot"]:
-
-                await user.send_message(
-                    config["decrypt_bot"],
-                    "alive"
-                )
-
-        except Exception as e:
-
-            logging.error(e)
-
-        await asyncio.sleep(30)
-
 # ================= PROCESS QUEUE =================
 
 async def process_queue():
@@ -493,7 +472,8 @@ async def process_queue():
                 "Sent to decrypt bot"
             )
 
-            await asyncio.sleep(40)
+            # NEXT FILE AFTER 20 SEC
+            await asyncio.sleep(20)
 
         except Exception as e:
 
@@ -594,14 +574,21 @@ async def monitor(event):
         ).lower()
 
         # ignore media
-        if (
-            filename.endswith(".jpg")
-            or filename.endswith(".png")
-            or filename.endswith(".mp4")
-            or filename.endswith(".jpeg")
-            or filename.endswith(".webp")
-        ):
-            return
+        media_ext = [
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".mp4",
+            ".webp",
+            ".gif",
+            ".mkv",
+            ".mov"
+        ]
+
+        for ext in media_ext:
+
+            if filename.endswith(ext):
+                return
 
         valid = False
 
@@ -661,6 +648,7 @@ async def decrypt_response(event):
 
         text = ""
 
+        # TXT RESPONSE
         if event.file:
 
             filename = (
@@ -691,12 +679,12 @@ async def decrypt_response(event):
 
         configs = []
 
-        # DIRECT
+        # DIRECT CONFIGS
         configs.extend(
             extract_configs(text)
         )
 
-        # JSON
+        # JSON CONFIGS
         try:
 
             start = text.find("{")
@@ -758,7 +746,7 @@ async def main():
 
     await user.start()
 
-    print("Starting BOT")
+    print("Starting CONTROL BOT")
 
     await bot.start(
         bot_token=BOT_TOKEN
@@ -771,14 +759,10 @@ async def main():
     )
 
     asyncio.create_task(
-        keep_alive()
-    )
-
-    asyncio.create_task(
         process_queue()
     )
 
-    print("RUNNING")
+    print("BOT RUNNING")
 
     await asyncio.gather(
         user.run_until_disconnected(),
