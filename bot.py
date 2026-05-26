@@ -1,39 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-ADVANCED TELEGRAM VPN CONFIG COLLECTOR
--------------------------------------
-
-FEATURES
-========
-✅ Monitor multiple channels
-✅ Keyword based filtering
-✅ Ignore photos/videos/media
-✅ Queue system
-✅ Send ONLY 1 file to decrypt bot
-✅ Wait 20 sec before next file
-✅ Duplicate remover
-✅ Auto extract:
-    - VLESS
-    - VMESS
-    - TROJAN
-    - SS
-    - HY2
-    - SSH
-✅ Extract from:
-    - .hc
-    - .dark
-    - .npvt
-    - .ssh
-    - txt/json
-✅ Extract from direct messages too
-✅ Upload clean configs to main channel
-✅ JSON recursive parser
-✅ Stable + async safe
-"""
-
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -43,6 +12,7 @@ from collections import deque
 
 from telethon import TelegramClient, events
 from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
 
 # =========================================================
 # CONFIG
@@ -53,12 +23,14 @@ API_HASH = "557478eb1546473d5d4da5a15990b379"
 
 BOT_TOKEN = "8285296504:AAHW15d5UcTTYrxR1uAdevw8VNDLLQ9y7l0"
 
-ADMIN_ID = 6167414734
+ADMIN_IDS = [
+    6167414734,
+    6167414734
+]
 
 USER_SESSION = "userbot"
 
 CONFIG_FILE = "config.json"
-
 PROCESSED_FILE = "processed.txt"
 
 # =========================================================
@@ -144,8 +116,6 @@ queue = deque()
 
 sent_hashes = set()
 
-processing = False
-
 ALLOWED_EXTENSIONS = [
     ".hc",
     ".ehi",
@@ -173,33 +143,36 @@ MEDIA_EXTENSIONS = [
 
 def normalize_text(text):
 
-    return text.replace("\r", "\n")
+    return str(text).replace("\r", "\n")
 
 def unique_list(items):
 
     seen = set()
-
     result = []
 
     for item in items:
 
-        item = item.strip()
+        item = str(item).strip()
 
         if not item:
             continue
 
-        h = hashlib.md5(
-            item.encode()
-        ).hexdigest()
-
-        if h in seen:
+        if item in seen:
             continue
 
-        seen.add(h)
+        seen.add(item)
 
         result.append(item)
 
     return result
+
+# =========================================================
+# ADMIN CHECK
+# =========================================================
+
+def is_admin(event):
+
+    return event.sender_id in ADMIN_IDS
 
 # =========================================================
 # DUPLICATE FILTER
@@ -219,7 +192,7 @@ def is_duplicate(text):
     return False
 
 # =========================================================
-# EXTRACT DIRECT CONFIGS
+# DIRECT CONFIG EXTRACTOR
 # =========================================================
 
 def extract_direct_configs(text):
@@ -231,15 +204,10 @@ def extract_direct_configs(text):
     patterns = [
 
         r'vless://[^\s"\']+',
-
         r'vmess://[^\s"\']+',
-
         r'trojan://[^\s"\']+',
-
         r'ss://[^\s"\']+',
-
         r'hy2://[^\s"\']+',
-
         r'hysteria2://[^\s"\']+'
     ]
 
@@ -251,12 +219,17 @@ def extract_direct_configs(text):
             re.IGNORECASE
         )
 
-        results.extend(found)
+        for item in found:
+
+            item = item.strip()
+            item = item.replace("\\/", "/")
+
+            results.append(item)
 
     return unique_list(results)
 
 # =========================================================
-# EXTRACT SSH
+# SSH EXTRACTOR
 # =========================================================
 
 def extract_ssh_accounts(text):
@@ -265,37 +238,36 @@ def extract_ssh_accounts(text):
 
     results = []
 
-    # FORMAT:
-    # host:port@user:pass
+    direct_pattern = r'([a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+:\d+@[^\s:@]+:[^\s]+)'
 
-    patterns = [
-
-        r'([a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+:\d+@[^\s:@]+:[^\s]+)',
-
-        r'Dominio\s*:\s*([^\s]+).*?User\s*:\s*([^\s]+).*?Pass\s*:\s*([^\s]+)',
-    ]
-
-    # DIRECT
-    found = re.findall(
-        patterns[0],
+    direct_found = re.findall(
+        direct_pattern,
         text,
         re.IGNORECASE
     )
 
-    results.extend(found)
+    results.extend(direct_found)
 
-    # DOMAIN USER PASS FORMAT
-    found2 = re.findall(
-        patterns[1],
-        text,
-        re.IGNORECASE | re.DOTALL
-    )
+    domain_patterns = [
 
-    for domain, userx, password in found2:
+        r'Dominio\s*:\s*([^\s]+).*?User\s*:\s*([^\s]+).*?Pass\s*:\s*([^\s]+)',
 
-        line = f"{domain}:80@{userx}:{password}"
+        r'Domain\s*:\s*([^\s]+).*?User\s*:\s*([^\s]+).*?Pass\s*:\s*([^\s]+)',
+    ]
 
-        results.append(line)
+    for pattern in domain_patterns:
+
+        found = re.findall(
+            pattern,
+            text,
+            re.IGNORECASE | re.DOTALL
+        )
+
+        for domain, username, password in found:
+
+            line = f"{domain}:80@{username}:{password}"
+
+            results.append(line)
 
     return unique_list(results)
 
@@ -307,29 +279,19 @@ def build_vless(outbound):
 
     try:
 
-        vnext = outbound["settings"]["vnext"][0]
-
-        user_data = vnext["users"][0]
+        settings = outbound.get("settings", {})
+        vnext = settings.get("vnext", [])[0]
+        user_data = vnext.get("users", [])[0]
 
         stream = outbound.get(
             "streamSettings",
             {}
         )
 
-        address = vnext.get(
-            "address",
-            ""
-        )
+        address = vnext.get("address", "")
+        port = vnext.get("port", 443)
 
-        port = vnext.get(
-            "port",
-            443
-        )
-
-        uuid = user_data.get(
-            "id",
-            ""
-        )
+        uuid = user_data.get("id", "")
 
         network = stream.get(
             "network",
@@ -341,23 +303,23 @@ def build_vless(outbound):
             "none"
         )
 
-        path = (
-            stream
-            .get("wsSettings", {})
-            .get("path", "/")
-        )
+        ws = stream.get("wsSettings", {})
+
+        path = ws.get("path", "/")
 
         host = (
-            stream
-            .get("wsSettings", {})
-            .get("headers", {})
+            ws.get("headers", {})
             .get("Host", "")
         )
 
-        sni = (
-            stream
-            .get("tlsSettings", {})
-            .get("serverName", "")
+        tls = stream.get(
+            "tlsSettings",
+            {}
+        )
+
+        sni = tls.get(
+            "serverName",
+            ""
         )
 
         return (
@@ -384,30 +346,28 @@ def build_vmess(outbound):
 
     try:
 
-        vnext = outbound["settings"]["vnext"][0]
-
-        user_data = vnext["users"][0]
+        settings = outbound.get("settings", {})
+        vnext = settings.get("vnext", [])[0]
+        user_data = vnext.get("users", [])[0]
 
         stream = outbound.get(
             "streamSettings",
             {}
         )
 
-        data = {
+        vmess_json = {
 
             "v": "2",
-
             "ps": "DecryptedAuto",
-
             "add": vnext.get("address", ""),
-
             "port": str(vnext.get("port", 443)),
-
             "id": user_data.get("id", ""),
-
             "aid": "0",
 
-            "net": stream.get("network", "ws"),
+            "net": stream.get(
+                "network",
+                "ws"
+            ),
 
             "type": "none",
 
@@ -437,10 +397,8 @@ def build_vmess(outbound):
             )
         }
 
-        import base64
-
         encoded = base64.b64encode(
-            json.dumps(data).encode()
+            json.dumps(vmess_json).encode()
         ).decode()
 
         return f"vmess://{encoded}"
@@ -448,6 +406,95 @@ def build_vmess(outbound):
     except Exception as e:
 
         logging.error(f"VMESS BUILD ERROR: {e}")
+
+        return None
+
+# =========================================================
+# BUILD TROJAN
+# =========================================================
+
+def build_trojan(outbound):
+
+    try:
+
+        settings = outbound.get(
+            "settings",
+            {}
+        )
+
+        server = settings.get(
+            "servers",
+            []
+        )[0]
+
+        stream = outbound.get(
+            "streamSettings",
+            {}
+        )
+
+        address = server.get(
+            "address",
+            ""
+        )
+
+        port = server.get(
+            "port",
+            443
+        )
+
+        password = server.get(
+            "password",
+            ""
+        )
+
+        network = stream.get(
+            "network",
+            "ws"
+        )
+
+        security = stream.get(
+            "security",
+            "tls"
+        )
+
+        ws = stream.get(
+            "wsSettings",
+            {}
+        )
+
+        path = ws.get(
+            "path",
+            "/"
+        )
+
+        host = (
+            ws.get("headers", {})
+            .get("Host", "")
+        )
+
+        tls = stream.get(
+            "tlsSettings",
+            {}
+        )
+
+        sni = tls.get(
+            "serverName",
+            ""
+        )
+
+        return (
+            f"trojan://{password}@{address}:{port}"
+            f"?type={network}"
+            f"&security={security}"
+            f"&path={path}"
+            f"&host={host}"
+            f"&sni={sni}"
+            f"#DecryptedAuto"
+        )
+
+    except Exception as e:
+
+        logging.error(f"TROJAN BUILD ERROR: {e}")
 
         return None
 
@@ -461,7 +508,6 @@ def parse_json(data, results):
 
         if isinstance(data, dict):
 
-            # DIRECT CONFIGS
             for k, v in data.items():
 
                 if isinstance(v, str):
@@ -476,16 +522,15 @@ def parse_json(data, results):
 
                 parse_json(v, results)
 
-            # HC SSH FIELD
             if "sshField" in data:
 
-                ssh = str(data["sshField"]).strip()
+                ssh = str(
+                    data["sshField"]
+                ).strip()
 
                 if ssh:
-
                     results.append(ssh)
 
-            # OUTBOUNDS
             if "outbounds" in data:
 
                 try:
@@ -499,21 +544,24 @@ def parse_json(data, results):
 
                         if protocol == "vless":
 
-                            link = build_vless(
-                                outbound
-                            )
+                            x = build_vless(outbound)
 
-                            if link:
-                                results.append(link)
+                            if x:
+                                results.append(x)
 
                         elif protocol == "vmess":
 
-                            link = build_vmess(
-                                outbound
-                            )
+                            x = build_vmess(outbound)
 
-                            if link:
-                                results.append(link)
+                            if x:
+                                results.append(x)
+
+                        elif protocol == "trojan":
+
+                            x = build_trojan(outbound)
+
+                            if x:
+                                results.append(x)
 
                 except Exception as e:
                     logging.error(e)
@@ -538,26 +586,28 @@ def extract_all(text):
 
     results = []
 
-    # DIRECT CONFIGS
     results.extend(
         extract_direct_configs(text)
     )
 
-    # SSH
     results.extend(
         extract_ssh_accounts(text)
     )
 
-    # TRY JSON
     try:
 
-        start = text.find("{")
+        fixed = (
+            text
+            .replace("\\/", "/")
+            .replace("\\n", "")
+        )
 
-        end = text.rfind("}") + 1
+        start = fixed.find("{")
+        end = fixed.rfind("}") + 1
 
         if start != -1 and end != -1:
 
-            raw = text[start:end]
+            raw = fixed[start:end]
 
             data = json.loads(raw)
 
@@ -570,15 +620,7 @@ def extract_all(text):
     return unique_list(results)
 
 # =========================================================
-# ADMIN CHECK
-# =========================================================
-
-def is_admin(event):
-
-    return event.sender_id == ADMIN_ID
-
-# =========================================================
-# START
+# COMMANDS
 # =========================================================
 
 @bot.on(events.NewMessage(pattern=r"^/start"))
@@ -610,24 +652,64 @@ async def add_channel(event):
 
     args = event.raw_text.split()[1:]
 
+    added = []
+    failed = []
+
     for ch in args:
 
-        if ch not in config["source_channels"]:
+        try:
 
-            config["source_channels"].append(ch)
+            if "t.me/+" in ch or "joinchat" in ch:
 
-            try:
+                invite_hash = (
+                    ch.split("/")[-1]
+                    .replace("+", "")
+                    .strip()
+                )
+
+                await user(
+                    ImportChatInviteRequest(
+                        invite_hash
+                    )
+                )
+
+            else:
 
                 await user(
                     JoinChannelRequest(ch)
                 )
 
-            except:
-                pass
+            if ch not in config["source_channels"]:
+
+                config["source_channels"].append(ch)
+
+            added.append(ch)
+
+        except Exception as e:
+
+            logging.error(e)
+
+            failed.append(ch)
 
     save_config()
 
-    await event.reply("✅ Added")
+    msg = ""
+
+    if added:
+
+        msg += (
+            "✅ Added:\n" +
+            "\n".join(added)
+        )
+
+    if failed:
+
+        msg += (
+            "\n\n❌ Failed:\n" +
+            "\n".join(failed)
+        )
+
+    await event.reply(msg)
 
 # =========================================================
 # REMOVE CHANNEL
@@ -641,15 +723,30 @@ async def remove_channel(event):
 
     args = event.raw_text.split()[1:]
 
+    removed = []
+
     for ch in args:
 
         if ch in config["source_channels"]:
 
             config["source_channels"].remove(ch)
 
+            removed.append(ch)
+
     save_config()
 
-    await event.reply("✅ Removed")
+    if removed:
+
+        await event.reply(
+            "✅ Removed:\n" +
+            "\n".join(removed)
+        )
+
+    else:
+
+        await event.reply(
+            "❌ Not Found"
+        )
 
 # =========================================================
 # SHOW CHANNELS
@@ -661,17 +758,20 @@ async def show_channels(event):
     if not is_admin(event):
         return
 
-    txt = "\n".join(
-        config["source_channels"]
+    if not config["source_channels"]:
+
+        await event.reply("No channels")
+
+        return
+
+    await event.reply(
+        "\n".join(
+            config["source_channels"]
+        )
     )
 
-    if not txt:
-        txt = "No channels"
-
-    await event.reply(txt)
-
 # =========================================================
-# MAIN CHANNEL
+# SET MAIN CHANNEL
 # =========================================================
 
 @bot.on(events.NewMessage(pattern=r"^/set_main_channel"))
@@ -692,7 +792,7 @@ async def set_main(event):
     await event.reply("✅ Saved")
 
 # =========================================================
-# DECRYPT BOT
+# SET DECRYPT BOT
 # =========================================================
 
 @bot.on(events.NewMessage(pattern=r"^/set_decrypt_bot"))
@@ -713,7 +813,7 @@ async def set_decrypt_bot(event):
     await event.reply("✅ Saved")
 
 # =========================================================
-# ADD KEYWORD
+# KEYWORD COMMANDS
 # =========================================================
 
 @bot.on(events.NewMessage(pattern=r"^/add_keyword"))
@@ -736,10 +836,6 @@ async def add_keyword(event):
 
     await event.reply("✅ Added")
 
-# =========================================================
-# REMOVE KEYWORD
-# =========================================================
-
 @bot.on(events.NewMessage(pattern=r"^/remove_keyword"))
 async def remove_keyword(event):
 
@@ -760,10 +856,6 @@ async def remove_keyword(event):
 
     await event.reply("✅ Removed")
 
-# =========================================================
-# SHOW KEYWORDS
-# =========================================================
-
 @bot.on(events.NewMessage(pattern=r"^/show_keywords"))
 async def show_keywords(event):
 
@@ -772,10 +864,27 @@ async def show_keywords(event):
 
     txt = "\n".join(config["keywords"])
 
-    if not txt:
-        txt = "No keywords"
+    await event.reply(
+        txt if txt else "No keywords"
+    )
 
-    await event.reply(txt)
+# =========================================================
+# KEYWORD MATCH
+# =========================================================
+
+def keyword_match(text):
+
+    if not config["keywords"]:
+        return True
+
+    text = text.lower()
+
+    for kw in config["keywords"]:
+
+        if kw.lower() in text:
+            return True
+
+    return False
 
 # =========================================================
 # PROCESS QUEUE
@@ -806,8 +915,11 @@ async def process_queue():
                 f"SENT TO DECRYPT: {path}"
             )
 
-            # IMPORTANT
-            # NEXT FILE AFTER 20 SEC
+            try:
+                os.remove(path)
+            except:
+                pass
+
             await asyncio.sleep(20)
 
         except Exception as e:
@@ -817,25 +929,7 @@ async def process_queue():
             await asyncio.sleep(5)
 
 # =========================================================
-# KEYWORD CHECK
-# =========================================================
-
-def keyword_match(text):
-
-    if not config["keywords"]:
-        return True
-
-    text = text.lower()
-
-    for kw in config["keywords"]:
-
-        if kw.lower() in text:
-            return True
-
-    return False
-
-# =========================================================
-# MONITOR CHANNELS
+# MONITOR
 # =========================================================
 
 @user.on(events.NewMessage)
@@ -874,19 +968,15 @@ async def monitor(event):
         filename = ""
 
         if msg.file:
+
             filename = (
                 msg.file.name or ""
             ).lower()
 
-        # KEYWORD FILTER
         if not keyword_match(
             text + " " + filename
         ):
             return
-
-        # =================================================
-        # DIRECT EXTRACTION
-        # =================================================
 
         extracted = extract_all(text)
 
@@ -904,23 +994,13 @@ async def monitor(event):
                 "\n\n".join(clean)
             )
 
-            logging.info(
-                f"DIRECT EXTRACT: {len(clean)}"
-            )
-
-        # =================================================
-        # FILE CHECK
-        # =================================================
-
         if not msg.file:
 
             processed.add(unique_id)
-
             save_processed(unique_id)
 
             return
 
-        # IGNORE MEDIA
         for ext in MEDIA_EXTENSIONS:
 
             if filename.endswith(ext):
@@ -931,7 +1011,6 @@ async def monitor(event):
         for ext in ALLOWED_EXTENSIONS:
 
             if filename.endswith(ext):
-
                 valid = True
                 break
 
@@ -945,7 +1024,7 @@ async def monitor(event):
         })
 
         logging.info(
-            f"QUEUED FILE: {filename}"
+            f"QUEUED: {filename}"
         )
 
         processed.add(unique_id)
@@ -957,7 +1036,7 @@ async def monitor(event):
         logging.error(e)
 
 # =========================================================
-# DECRYPT BOT RESPONSE
+# DECRYPT RESPONSE
 # =========================================================
 
 @user.on(events.NewMessage)
@@ -986,7 +1065,6 @@ async def decrypt_response(event):
 
         text = ""
 
-        # TXT FILE
         if event.file:
 
             filename = (
@@ -1006,7 +1084,10 @@ async def decrypt_response(event):
 
                     text = f.read()
 
-                os.remove(path)
+                try:
+                    os.remove(path)
+                except:
+                    pass
 
         elif event.raw_text:
 
@@ -1027,7 +1108,7 @@ async def decrypt_response(event):
         if not clean:
 
             logging.warning(
-                "NO CONFIG FOUND"
+                "NO CONFIG EXTRACTED"
             )
 
             return
@@ -1038,7 +1119,7 @@ async def decrypt_response(event):
         )
 
         logging.info(
-            f"UPLOADED: {len(clean)} CONFIGS"
+            f"UPLOADED {len(clean)} CONFIGS"
         )
 
     except Exception as e:
@@ -1063,7 +1144,9 @@ async def main():
 
     me = await user.get_me()
 
-    print(f"LOGGED IN: {me.first_name}")
+    print(
+        f"LOGGED IN AS: {me.first_name}"
+    )
 
     asyncio.create_task(
         process_queue()
